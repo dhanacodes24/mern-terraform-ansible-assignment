@@ -1,8 +1,10 @@
-# mern-terraform-ansible-assignment
 
 <div align="center">
 
 # Deploying a MERN Application on AWS with Terraform and Ansible
+
+<img width="1018" height="517" alt="image" src="https://github.com/user-attachments/assets/32ae3687-2d4b-426b-995f-c166adfdc0a1" />
+
 
 **Infrastructure as Code for the [TravelMemory](https://github.com/UnpredictablePrashant/TravelMemory) app: network, servers, security and deployment, all from code.**
 

@@ -1,0 +1,210 @@
+---
+- name: Deploy the MERN application on the web server
+  hosts: web
+  become: true
+ 
+  tasks:
+    # ---------- Safety net: swap space for npm builds ----------
+    - name: Create a 2 GB swap file
+      ansible.builtin.command: fallocate -l 2G /swapfile
+      args:
+        creates: /swapfile
+ 
+    - name: Restrict swap file permissions
+      ansible.builtin.file:
+        path: /swapfile
+        mode: "0600"
+ 
+    - name: Format swap file
+      ansible.builtin.command: mkswap /swapfile
+      when: ansible_swaptotal_mb == 0
+      changed_when: true
+ 
+    - name: Enable swap
+      ansible.builtin.command: swapon /swapfile
+      when: ansible_swaptotal_mb == 0
+      changed_when: true
+ 
+    - name: Make swap permanent
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "/swapfile none swap sw 0 0"
+        state: present
+ 
+    # ---------- Node.js ----------
+    - name: Download NodeSource GPG key
+      ansible.builtin.get_url:
+        url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+        dest: /etc/apt/keyrings/nodesource.asc
+        mode: "0644"
+ 
+    - name: Add NodeSource apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_{{ node_major }}.x nodistro main"
+        filename: nodesource
+        state: present
+ 
+    - name: Install Node.js (includes npm), Nginx and build tools
+      ansible.builtin.apt:
+        name:
+          - nodejs
+          - nginx
+          - build-essential
+        state: present
+        update_cache: true
+        lock_timeout: 180
+ 
+    - name: Install PM2 (keeps the Node app running) globally
+      community.general.npm:
+        name: pm2
+        global: true
+        state: present
+ 
+    # ---------- Application code ----------
+    - name: Create application directory owned by the ubuntu user
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+ 
+    - name: Clone the TravelMemory repository
+      ansible.builtin.git:
+        repo: "{{ app_repo }}"
+        dest: "{{ app_dir }}"
+        version: "{{ app_branch }}"
+        update: true
+        force: true
+      become: false
+ 
+    # ---------- Backend ----------
+    - name: Write backend .env (database connection and port)
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/backend/.env"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+        content: |
+          MONGO_URI=mongodb://{{ mongo_app_user }}:{{ vault_mongo_app_password }}@{{ db_private_ip }}:27017/{{ mongo_db_name }}?authSource={{ mongo_db_name }}
+          PORT={{ backend_port }}
+          CORS_ORIGIN=http://{{ web_public_ip }}
+      no_log: true
+ 
+    - name: Install backend dependencies
+      ansible.builtin.command:
+        cmd: npm install --no-audit --no-fund
+        chdir: "{{ app_dir }}/backend"
+      become: false
+      changed_when: true
+ 
+    - name: Start (or restart) the backend with PM2
+      ansible.builtin.shell: pm2 restart travel-backend --update-env || pm2 start index.js --name travel-backend
+      args:
+        chdir: "{{ app_dir }}/backend"
+      become: false
+      changed_when: true
+ 
+    - name: Save the PM2 process list
+      ansible.builtin.command: pm2 save
+      become: false
+      changed_when: true
+ 
+    - name: Make PM2 start automatically after a reboot
+      ansible.builtin.command:
+        cmd: env PATH=$PATH:/usr/bin /usr/bin/pm2 startup systemd -u ubuntu --hp /home/ubuntu
+        creates: /etc/systemd/system/pm2-ubuntu.service
+ 
+    # ---------- Frontend ----------
+    - name: Write frontend .env (where the browser finds the API)
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/frontend/.env"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          REACT_APP_BACKEND_URL=http://{{ web_public_ip }}/api
+ 
+    - name: Install frontend dependencies
+      ansible.builtin.command:
+        cmd: npm install --no-audit --no-fund --legacy-peer-deps
+        chdir: "{{ app_dir }}/frontend"
+      become: false
+      changed_when: true
+ 
+    - name: Build the React frontend (creates static files in frontend/build)
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ app_dir }}/frontend"
+      become: false
+      environment:
+        CI: "false"
+        NODE_OPTIONS: "--max-old-space-size=1536"
+      changed_when: true
+ 
+    # ---------- Nginx ----------
+    - name: Remove the default Nginx site (it would conflict on port 80)
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+ 
+    - name: Create Nginx site for TravelMemory
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/travelmemory
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+              server_name _;
+
+              # Allow image uploads from the add-trip form (Nginx default is only 1 MB)
+              client_max_body_size 10m;
+ 
+              # React static files
+              root {{ app_dir }}/frontend/build;
+              index index.html;
+ 
+              location / {
+                  try_files $uri /index.html;
+              }
+ 
+              # API calls: /api/xyz  ->  Express backend at http://127.0.0.1:{{ backend_port }}/xyz
+              location /api/ {
+                  proxy_pass http://127.0.0.1:{{ backend_port }}/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+      notify: Reload Nginx
+ 
+    - name: Enable the TravelMemory site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/travelmemory
+        dest: /etc/nginx/sites-enabled/travelmemory
+        state: link
+      notify: Reload Nginx
+ 
+    - name: Test the Nginx configuration
+      ansible.builtin.command: nginx -t
+      changed_when: false
+ 
+    - name: Start Nginx and enable it on boot
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+ 
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+

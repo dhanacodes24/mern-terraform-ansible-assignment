@@ -1,0 +1,7 @@
+---
+# Run everything in the right order:  ansible-playbook playbooks/site.yml
+- import_playbook: 01-common.yml
+- import_playbook: 02-database.yml
+- import_playbook: 03-webserver.yml
+- import_playbook: 04-hardening.yml
+

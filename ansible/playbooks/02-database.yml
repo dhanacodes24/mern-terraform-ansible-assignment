@@ -1,0 +1,124 @@
+---
+- name: Install and secure MongoDB on the database server
+  hosts: db
+  become: true
+ 
+  tasks:
+    - name: Download MongoDB GPG key
+      ansible.builtin.get_url:
+        url: "https://www.mongodb.org/static/pgp/server-{{ mongo_version }}.asc"
+        dest: "/etc/apt/keyrings/mongodb-server-{{ mongo_version }}.asc"
+        mode: "0644"
+ 
+    - name: Add MongoDB apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64,arm64 signed-by=/etc/apt/keyrings/mongodb-server-{{ mongo_version }}.asc] https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/{{ mongo_version }} multiverse"
+        filename: "mongodb-org-{{ mongo_version }}"
+        state: present
+ 
+    - name: Install MongoDB
+      ansible.builtin.apt:
+        name: mongodb-org
+        state: present
+        update_cache: true
+        lock_timeout: 180
+ 
+    - name: Start MongoDB and enable it on boot
+      ansible.builtin.service:
+        name: mongod
+        state: started
+        enabled: true
+ 
+    - name: Wait until MongoDB listens on localhost
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: 27017
+        timeout: 60
+ 
+    # Users are created ONCE, while authentication is still off (the "localhost exception").
+    - name: Create admin user and application user (first run only)
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - --quiet
+          - --eval
+          - |
+            const adminDb = db.getSiblingDB('admin');
+            adminDb.createUser({
+              user: '{{ mongo_admin_user }}',
+              pwd: '{{ vault_mongo_admin_password }}',
+              roles: [ { role: 'root', db: 'admin' } ]
+            });
+            const appDb = db.getSiblingDB('{{ mongo_db_name }}');
+            appDb.createUser({
+              user: '{{ mongo_app_user }}',
+              pwd: '{{ vault_mongo_app_password }}',
+              roles: [ { role: 'readWrite', db: '{{ mongo_db_name }}' } ]
+            });
+        creates: /var/lib/mongodb/.users_created
+      register: create_users
+      no_log: true
+ 
+    - name: Remember that users were created (so the step above is skipped next time)
+      ansible.builtin.file:
+        path: /var/lib/mongodb/.users_created
+        state: touch
+        owner: mongodb
+        group: mongodb
+        mode: "0600"
+      when: create_users is changed
+ 
+    - name: Configure MongoDB (listen on private IP, require login)
+      ansible.builtin.copy:
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible - do not edit by hand
+          storage:
+            dbPath: /var/lib/mongodb
+          systemLog:
+            destination: file
+            logAppend: true
+            path: /var/log/mongodb/mongod.log
+          net:
+            port: 27017
+            bindIp: 127.0.0.1,{{ ansible_default_ipv4.address }}
+          processManagement:
+            timeZoneInfo: /usr/share/zoneinfo
+          security:
+            authorization: enabled
+      notify: Restart MongoDB
+ 
+    - name: Apply the new configuration now
+      ansible.builtin.meta: flush_handlers
+ 
+    - name: Wait until MongoDB listens on the private IP
+      ansible.builtin.wait_for:
+        host: "{{ ansible_default_ipv4.address }}"
+        port: 27017
+        timeout: 60
+ 
+    - name: Verify that the application user can log in
+      ansible.builtin.command:
+        argv:
+          - mongosh
+          - --quiet
+          - "mongodb://{{ mongo_app_user }}:{{ vault_mongo_app_password }}@127.0.0.1:27017/{{ mongo_db_name }}?authSource={{ mongo_db_name }}"
+          - --eval
+          - "db.runCommand({ ping: 1 }).ok"
+      register: login_test
+      changed_when: false
+      no_log: true
+ 
+    - name: Show login test result
+      ansible.builtin.debug:
+        msg: "MongoDB login test returned: {{ login_test.stdout }} (1 means success)"
+ 
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.service:
+        name: mongod
+        state: restarted
+

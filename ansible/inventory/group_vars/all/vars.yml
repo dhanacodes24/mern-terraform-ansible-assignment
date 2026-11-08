@@ -1,0 +1,22 @@
+---
+# ---- Application ----
+app_repo: "https://github.com/UnpredictablePrashant/TravelMemory.git"
+app_branch: main
+app_dir: /opt/travelmemory
+backend_port: 3001
+node_major: 22
+ 
+# ---- Network (must match your Terraform values) ----
+public_subnet_cidr: "10.0.1.0/24"
+web_public_ip: "{{ hostvars['web1'].ansible_host }}"
+db_private_ip: "{{ hostvars['db1'].ansible_host }}"
+ 
+# ---- MongoDB ----
+mongo_version: "7.0"
+mongo_db_name: travelmemory
+mongo_admin_user: mongoadmin
+mongo_app_user: travelapp
+# Passwords live in vault.yml (encrypted with ansible-vault):
+#   vault_mongo_admin_password
+#   vault_mongo_app_password
+

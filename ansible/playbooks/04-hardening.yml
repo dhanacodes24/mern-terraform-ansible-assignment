@@ -1,0 +1,80 @@
+---
+- name: Security hardening for ALL servers
+  hosts: all
+  become: true
+ 
+  tasks:
+    # ---------- SSH ----------
+    - name: Harden the SSH daemon (key login only, no root login)
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/01-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: "sshd -t -f %s"
+        content: |
+          # Managed by Ansible
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          MaxAuthTries 3
+          LoginGraceTime 30
+          X11Forwarding no
+          AllowUsers ubuntu
+          ClientAliveInterval 300
+          ClientAliveCountMax 2
+      notify: Restart SSH
+ 
+    # ---------- Firewall (UFW) ----------
+    - name: UFW - rate-limit SSH on the web server
+      community.general.ufw:
+        rule: limit
+        port: "22"
+        proto: tcp
+      when: inventory_hostname in groups['web']
+ 
+    - name: UFW - allow HTTP and HTTPS on the web server
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["80", "443"]
+      when: inventory_hostname in groups['web']
+ 
+    - name: UFW - on the DB server allow SSH and MongoDB only from the public subnet
+      community.general.ufw:
+        rule: allow
+        src: "{{ public_subnet_cidr }}"
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["22", "27017"]
+      when: inventory_hostname in groups['db']
+ 
+    - name: UFW - deny everything else coming in, then switch the firewall on
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+ 
+    # ---------- Automatic security updates ----------
+    - name: Enable unattended security upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+ 
+    - name: Make sure fail2ban is running
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+ 
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+

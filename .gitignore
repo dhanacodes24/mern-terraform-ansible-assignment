@@ -1,0 +1,26 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfplan
+tfplan
+crash.log
+# keep .terraform.lock.hcl committed
+ 
+# Ansible
+ansible/inventory/hosts.ini
+ansible/.vault_pass
+ansible/group_vars/all/vault.yml
+*.retry
+ 
+# Secrets - NEVER commit these
+*.pem
+*.key
+id_*
+mern-key
+mern-key.pub
+.env
+.aws/
+
+ansible/inventory/group_vars/all/vault.yml
